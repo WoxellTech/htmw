@@ -1,9 +1,9 @@
 /**
- * (c) HTMW vT.1 by Woxell.co
+ * (c) HTMW vT.2 by Woxell.co
  * 
  * [WARNING]
  * The current version is a test version, it's unstable and there are known memory leaks and unhandled errors.
- * The purpose for now is just to test it's functionality.
+ * The purpose for now is just to implement and test it's functionality without focusing 100% on performance & optimization.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -131,7 +131,8 @@ typedef union {
 } ht_any;
 
 typedef struct {
-    u_map* templates;
+    u_map* includes;                            // map of strings (path, content) global includes are prefixed with `>`
+    u_map* templates;                           // (name, ht_template)
     string input;
     lua_State* L;
 } htmw_context;
@@ -254,7 +255,7 @@ void throw_error(const char* msg, flag_t flags) {
     }
 }
 
-string read_file(const char* path) {
+string read_file(const char* path, int exe_location) {
     string s = str_new(MAX_LEN_IN);
     FILE* f = fopen(path, "r");
 
@@ -498,11 +499,326 @@ char* generate_lua_template_constructor(const string name, const string impl, co
     return out;
 }
 
+/*typedef struct {
+    field_location fl;
+    string path;
+    flag_t flags;
+} include_frag;*/
+
+typedef struct {
+    size_t idx;
+    size_t replaced_length;
+    string path;
+    string* content;
+} include_dir;
+
+#define INCLUDE_ONCE 1
+#define INCLUDE_GLOB 2
+
+void htmw_apply_includes(string* in, u_map* includes) {
+    list* dirs = list_new();    // list of include_dir
+    size_t difference = 0;
+    wchar_t c;
+    //printf("in->length: %zu\n", in->length);
+    for (size_t idx = 0; idx < in->length; idx++) {
+        c = in->c_str[idx];
+        //printf("i: %zu\tlen: %zu\tc: '%lc'\n", idx, in->length, c);
+        if (c == L'<') {
+            if (!wcsncmp(in->c_str + idx + 1, L"@include", 8)) {
+#if DEBUG_MODE
+                //printf("after include kw: \"%lc\"\n", in->c_str[idx + 1 + 8]);
+#endif
+                wchar_t c;
+                uint8_t phase = 0;
+                flag_t flags = 0;
+                size_t path_begin_idx = 0;
+                string view = nullstr;
+                wchar_t delim = L'\0';
+                include_dir* incl = (include_dir*)malloc(sizeof(include_dir));
+                for (size_t i = 0; (c = in->c_str[idx + 1 + 8 + i]) != L'\0'; i++) {
+                    switch (c) {
+                    case L' ':
+                    case L'\n':
+                    case L'\t':
+                    case L'\r':
+                        if (!phase) {
+                            phase = 1;
+                        } else if (phase == 4) {
+                            throw_error("Tags cannot contain whitespaces at the end (after the '/')", E_EXIT);
+                        }
+                        break;
+                    case L'"':
+                    case L'\'':
+                        if (phase == 0 || phase == 1) {
+                            view.c_str = in->c_str + idx + 1 + 8 + i + 1;
+                            path_begin_idx = i;
+                            phase = 2;
+                            delim = c;
+                        } else if (phase == 2) {
+                            if (c == delim) {
+                                view.length = i - 1 - path_begin_idx;
+                                phase = 3;
+                            }
+                        } else {
+                            throw_error("Invalid character ''' or '\"' in include directive", E_EXIT);
+                        }
+                        break;
+                    case L'<':
+                        if (phase == 0 || phase == 1) {
+                            flags |= INCLUDE_GLOB;
+                            view.c_str = in->c_str + idx + 1 + 8 + i + 1;
+                            path_begin_idx = i;
+                            phase = 2;
+                            delim = L'>';
+                        } else {
+#if DEBUG_MODE
+                            //printf("after include: \"%lc\"\n", in->c_str[idx + 1 + 8 + i + 1]);
+#endif
+                            throw_error("Invalid character '<' in include directive", E_EXIT);
+                        }
+                        break;
+                    case L'>':
+#if DEBUG_MODE
+                            //printf("phase: \"%u\"\n", phase);
+#endif
+                        if (phase == 2) {
+                            if (delim == L'>') {
+                                view.length = i - 1 - path_begin_idx;
+                                phase = 3;
+                            } else {
+                                // throw exception?
+                            }
+                        } else if (phase == 3 || phase == 4) {
+                            incl->idx = idx - difference;
+                            incl->replaced_length = i + 9 + 1;
+                            //printf("lenn: %zu\n", i + 9);
+                            difference += incl->replaced_length;
+                            goto include_for_break;
+                        } else {
+                            throw_error("No include path specified", E_EXIT);
+                        }
+                        break;
+                    case L'/':
+                        if (phase == 3)
+                            phase = 4;
+                        break;
+                    default:
+                        if (!phase) {
+                            if (!wcsncmp(in->c_str + idx + 1 + 8 + i, L"_once", 5)) {
+                                flags |= INCLUDE_ONCE;
+                                phase = 1;
+                                i += 4;
+                            } else {
+                                throw_error("Invalid character in include directive", E_EXIT);
+                            }
+                        } else if (phase != 2) {
+                            throw_error("Invalid character in include directive", E_EXIT);
+                        }
+                    }
+                }
+                include_for_break:;
+#if DEBUG_MODE
+                /*puts("<------------------->");
+                printf("%zu\t%zu\t%p\n", view.length, view.size, view.c_str);
+                printf("once: %d\n", flag_includes(flags, INCLUDE_ONCE));
+                printf("glob: %d\n", flag_includes(flags, INCLUDE_GLOB));
+                str_debug(view);*/
+#endif
+                //include_frag* incl = (include_frag*)malloc(sizeof(include_frag));
+                //incl->path = str_cpy(view);
+                //string name = str_cpy(view);
+                string path;
+                string* content = NULL;
+                if (flag_includes(flags, INCLUDE_GLOB)) {
+                    path = str_new(view.length + 2);
+                    str_append_ch(&path, L'>');
+                    str_append(&path, view.c_str, view.length);
+                } else {
+                    path = str_cpy(view);
+                }
+                
+                if (!map_get(includes, path.c_str, &content)) {
+                    //map_set(includes, path.c_str, (void*)content, 0);
+
+                    content = (string*)malloc(sizeof(string));
+                    if (flag_includes(flags, INCLUDE_GLOB)) {
+                        
+                        char* path_c_str = (char*)malloc((path.length + 1 + 8) * sizeof(char));
+                        sprintf(path_c_str, "include/%ls", path.c_str + 1);
+                        //wcstombs(path_c_str, path.c_str + 1, path.length);
+                        path_c_str[path.length + 8] = '\0';
+                        if (!strncmp(path_c_str + 8, "https://", 8) || !strncmp(path_c_str + 8, "http://", 7)) {
+                            // TODO: implement HTTP Include
+                            throw_error("HTTP Include is not implemented yet", E_EXIT);
+                        } else {
+#if DEBUG_MODE
+                            //printf("path: %s\n", path_c_str);
+#endif
+                            *content = read_file(path_c_str, 1);
+                            htmw_apply_includes(content, includes);
+                        }
+                    
+                        free(path_c_str);
+                    } else {
+                        char* path_c_str = (char*)malloc((path.length + 1) * sizeof(char));
+                        wcstombs(path_c_str, path.c_str, path.length);
+                        path_c_str[path.length] = '\0';
+                        *content = read_file(path_c_str, 0);
+                        htmw_apply_includes(content, includes);
+                        free(path_c_str);
+                    }
+                } else if (flag_includes(flags, INCLUDE_ONCE)) {
+                    //puts("############################");
+                    content = NULL;
+                    //break;
+                } else {
+                    //printf("content: %p\n", content);
+                    //////htmw_apply_includes(content, includes);
+
+
+
+                    content = (string*)malloc(sizeof(string));
+                    if (flag_includes(flags, INCLUDE_GLOB)) {
+                        
+                        char* path_c_str = (char*)malloc((path.length + 1 + 8) * sizeof(char));
+                        sprintf(path_c_str, "include/%ls", path.c_str + 1);
+                        //wcstombs(path_c_str, path.c_str + 1, path.length);
+                        path_c_str[path.length + 8] = '\0';
+                        if (!strncmp(path_c_str + 8, "https://", 8) || !strncmp(path_c_str + 8, "http://", 7)) {
+                            // TODO: implement HTTP Include
+                            throw_error("HTTP Include is not implemented yet", E_EXIT);
+                        } else {
+#if DEBUG_MODE
+                            //printf("path: %s\n", path_c_str);
+#endif
+                            *content = read_file(path_c_str, 1);
+                            htmw_apply_includes(content, includes);
+                        }
+                    
+                        free(path_c_str);
+                    } else {
+                        char* path_c_str = (char*)malloc((path.length + 1) * sizeof(char));
+                        wcstombs(path_c_str, path.c_str, path.length);
+                        path_c_str[path.length] = '\0';
+                        *content = read_file(path_c_str, 0);
+                        htmw_apply_includes(content, includes);
+                        free(path_c_str);
+                    }
+
+
+                }
+                incl->path = path;
+                incl->content = content;
+#if DEBUG_MODE
+                puts("_____________________________________");
+                if (content != NULL)
+                    str_debug(*content);
+                else
+                    puts("(null)");
+#endif
+                map_set(includes, path.c_str, (void*)content, 0);
+                list_add(dirs, (void*)incl); // TODO: fix idx and length and replace includes with their file content
+#if DEBUG_MODE
+                printf("idx: %zu\nlen: %zu\npath: \"%ls\"\n-------\n\n", incl->idx, incl->replaced_length, incl->path.c_str);
+#endif
+            }
+        }
+    }
+#if DEBUG_MODE
+    /*u_map_node* incl = includes->head;
+    puts("---[U_MAP]---");
+    while (incl != NULL) {
+        include_dir* dir = (include_dir*)incl->data;
+        if (dir != NULL)
+            printf("\"%ls\"\n", dir->path);
+        else puts("(null)");
+        incl = incl->next;
+    }
+    puts("---[U_END]---");*/
+
+    list_node* incl = dirs->head;
+    puts("---[U_MAP]---");
+    while (incl != NULL) {
+        include_dir* dir = (include_dir*)incl->data;
+        if (dir != NULL) {
+            printf("\"%ls\"\n", dir->path.c_str);
+        } else puts("(null)");
+        incl = incl->next;
+    }
+    puts("---[U_END]---");
+
+    //printf("TOT diff: %zu\n", difference);
+#endif
+    size_t includes_len_tot = 0;
+
+    for (size_t i = 0; i < dirs->size; i++) {
+        include_dir* dir = (include_dir*)list_get(dirs, i);
+        //str_debug(*dir->content);
+    }
+
+    list_node* ln = dirs->head;
+    while (ln != NULL) {
+        include_dir* dir = (include_dir*)ln->data;
+        if (dir->content != NULL)
+            includes_len_tot += dir->content->length;
+
+        ln = ln->next;
+    }
+
+    //printf("TOT len: %zu\n", includes_len_tot);
+
+    string n = str_new(in->length + includes_len_tot - difference + 1);
+
+    ln = dirs->head;
+    include_dir* dir = NULL;
+    size_t i = 0;
+    if (ln != NULL) {
+        dir = (include_dir*)ln->data;
+    } else goto include_rewrite_skip_cond;
+    difference = 0;
+    for (; i < in->length; i++) {
+        //printf("i: %zu\n", i);
+        if (/*dir != NULL && */i - difference == dir->idx) {
+            string* content = dir->content;
+            if (content != NULL) {
+                for (size_t j = 0; j < content->length; j++) {
+                    str_append_ch(&n, content->c_str[j]);
+                    //printf(".");
+                    //putwc(content->c_str[i], stdout);
+                }
+            }
+            i += dir->replaced_length - 1;
+            difference += dir->replaced_length;
+            ln = ln->next;
+            if (ln != NULL) {
+                dir = (include_dir*)ln->data;
+            } else {
+                ++i;
+                break;
+            }
+        } else {
+            str_append_ch(&n, in->c_str[i]);
+            //printf("_");
+            //putwc(in->c_str[i], stdout);
+        }
+    }
+    include_rewrite_skip_cond:
+    for (; i < in->length; i++) {
+        str_append_ch(&n, in->c_str[i]);
+    }
+    str_delete(in);
+    *in = n;
+}
+
 // parses all the <@...> tags, and returns a clean string with saved templates + state in the context struct
 htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
     string post_in = str_new(MAX_LEN_OUT);
 
     u_map* templates = ectx == NULL ? map_new() : ectx->templates;
+    u_map* includes = ectx == NULL ? map_new() : ectx->includes;
+
+    //if (ectx == NULL)             commented out in case users want dynamic includes
+    htmw_apply_includes(&in, includes);
 
     int comment_mode = 0;
     int php_mode = 0;
@@ -512,7 +828,7 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
     wchar_t c;
 
     ht_any current;
-    string current_template_name = { 0, 0, NULL };
+    string current_template_name = nullstr;
     for (size_t idx = 0; (c = in.c_str[idx]) != L'\0'; idx++) {
         //putwc(c, stdout);
         switch (mode) {
@@ -781,6 +1097,7 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
         }
     }
     return (htmw_context) {
+        includes,
         templates,
         post_in,
         L
@@ -1413,7 +1730,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                                 fl->idx = j;
                                 list_add(fields_list, (void*)fl);
 #if DEBUG_MODE
-                                printf("t1: %p\tpos: %zu\tname: %ls\n", t, fl->pos, t->name.c_str);
+                                //printf("t1: %p\tpos: %zu\tname: %ls\n", t, fl->pos, t->name.c_str);
                                 //printf("t1r_idx: %zu\n", fl->pos);
 #endif
                                 goto widget_name_to_arg_parse;
@@ -1445,7 +1762,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                                 fl->idx = j;
                                 list_add(fields_list, (void*)fl);
 #if DEBUG_MODE
-                                printf("t2: %p\tpos: %zu\tname: %ls\n", t, fl->pos, t->name.c_str);
+                                //printf("t2: %p\tpos: %zu\tname: %ls\n", t, fl->pos, t->name.c_str);
 #endif
                                 goto widget_name_to_arg_parse;
                                 //break;
@@ -1464,9 +1781,11 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                     };
                     u_map_node* mnt = (u_map_node*)ctx.templates->head;
                     size_t j;
+#if DEBUG_MODE
                     if (!wcsncmp(name_buffer.c_str, L"test", 4)) {
                         puts("__test__");
                     }
+#endif
                     for (j = 0; j < ctx.templates->size; j++) {
                         ht_template* tt = (ht_template*)mnt->data;
                         if (i/* - 1*/ == tt->name.length && !wcsncmp(name_buffer.c_str, tt->name.c_str, i/* - 1*/)) {
@@ -1477,7 +1796,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                                 fl->idx = j;
                                 list_add(fields_list, (void*)fl);
 #if DEBUG_MODE
-                                printf("t3: %p\tpos: %zu\tname: %ls\n", t, fl->pos, t->name.c_str);
+                                //printf("t3: %p\tpos: %zu\tname: %ls\n", t, fl->pos, t->name.c_str);
 #endif
                             }
                             break;
@@ -1838,7 +2157,7 @@ int main(int argc, char** argv) {
                 config.output_name = argv[++i];
                 break;
             case 'v':
-                printf("HTMW vT.1\nWoxell\n\n");
+                printf("HTMW vT.2\nWoxell\n\n");
                 show_ver = 1;
                 break;
             default:
@@ -1864,7 +2183,7 @@ int main(int argc, char** argv) {
     char* out_name = (char*)malloc((strlen(config.origin_name) + (config.format ? strlen(config.format) : 4) + 2) * sizeof(char));
     sprintf(out_name, "%s.%s", config.origin_name, (config.format ? config.format : "html"));
 
-    string in = read_file(in_name);
+    string in = read_file(in_name, 0);
     lua_State* L = luaL_newstate();
     luaL_openlibs(L);
 
