@@ -1,5 +1,5 @@
 /**
- * (c) HTMW vT.2 by Woxell.co
+ * (c) HTMW vT.3 by Woxell.co
  * 
  * [WARNING]
  * The current version is a test version, it's unstable and there are known memory leaks and unhandled errors.
@@ -21,6 +21,9 @@
 #include "nx/stack.h"
 #include "flag.h"
 
+#include "str.h"
+#include "jsw.h"
+
 #ifdef _WIN32
 #pragma comment(lib, "lua54.lib")
 #endif // _WIN32
@@ -38,10 +41,6 @@
 #define MAX_LEN_OUT 100000000
 #define MAX_LEN_LN 10000
 #define MAX_TEMPLATE_LEN 1000000
-
-#define str_isempty(s) (!((s).length))
-#define nullstr ((string) { 0, 0, NULL })
-#define str_isnull(s) (((s).c_str == NULL) && ((s).length == 0) && ((s).size == 0))
 
 #if defined(_WIN32)
     #include <windows.h>
@@ -86,16 +85,13 @@ char* get_executable_dir() {
     return buffer;
 }
 
-typedef struct {
-    size_t length;
-    size_t size;
-    wchar_t* c_str;
-} string;
+#define T_ARG_NULLABLE      (1 << 0)
+#define T_ARG_DOUBLEASS     (1 << 1)
 
 typedef struct {
     string name;
     string default_value;
-    int nullable;
+    flag_t flags;                               // nullable or double ass
 } ht_template_arg;
 
 typedef struct {
@@ -152,74 +148,6 @@ typedef struct {
     field_location* fields;                     // contains the info where each field is located on the ground (pos) and which placeholder (idx)
     string ground;                              // content with invisible placeholders
 } txt_template_fill_data;
-
-string str_new(size_t max_size) {
-    wchar_t* data = (wchar_t*)malloc(max_size * sizeof(wchar_t));
-    data[0] = L'\0';
-    return (string) {
-        .length = 0,
-        .size = max_size,
-        .c_str = data
-    };
-}
-
-void str_delete(string* x) {
-    if (x->size)
-        free(x->c_str);
-    *x = nullstr;
-}
-
-void str_debug(string s) {
-    char c = L'\0';
-    puts("---[string debug begin]---");
-    printf("(length: %zu, size: %zu)\"", s.length, s.size);
-    /*for (size_t i = 0; (c = s.c_str[i]) != L'\0'; i++) {
-        putwc(c, stdout);
-    }*/
-    for (size_t i = 0; i < s.length; i++) {
-        c = s.c_str[i];
-        putwc(c, stdout);
-    }
-    putc('"', stdout);
-    puts("---[string debug end]---");
-}
-
-string str_append(string* x, const wchar_t* s, size_t n) {
-    if (x->c_str == NULL) return nullstr;
-    if (s == NULL) return *x;
-    size_t add_size = wcslen(s);
-    add_size = add_size < n ? add_size : n;
-    wcsncpy(x->c_str + x->length, s, add_size);
-    x->length += add_size;
-    x->c_str[x->length] = L'\0';
-    return *x;
-}
-
-#define str_append_ch(x, c) {if ((x)->length < (x)->size - 1) { (x)->c_str[(x)->length] = (c); (x)->length++; (x)->c_str[(x)->length] = L'\0'; }}
-
-string _str_append_ch(string* x, wchar_t c) {
-    if (x->length < x->size - 1) {
-        x->c_str[x->length] = c;
-        x->length++;
-        x->c_str[x->length] = L'\0';
-    }
-    return *x;
-}
-
-string str_cpy(const string x) {
-    string o = (string){
-        .length = x.length,
-        .size = x.length + 1,
-        .c_str = (wchar_t*)malloc((x.length + 1) * sizeof(wchar_t))
-    };
-#if DEBUG_MODE
-    //printf("\n%u\n", x.length);
-    //str_debug(x);
-#endif
-    wcsncpy(o.c_str, x.c_str, x.length);
-    o.c_str[x.length] = L'\0';
-    return o;
-}
 
 ht_template_core* htmw_process_template_inner(ht_template t);
 htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx);
@@ -289,15 +217,25 @@ FILE* fopen_g(const char* filename, const char* mode) {
 void parse_template_args(ht_template* t, string in, size_t n) {
     //printf("_________________n: %u___________________", n);
     string* args_split = (string*)malloc(n * sizeof(string));
+    flag_t* args_flag = (flag_t*)calloc(n, sizeof(flag_t));
+    string* args_default = (string*)malloc(n * sizeof(string));
+
+#if DEBUG_MODE
+    //str_debug(in);
+#endif
 
     size_t count = 0;
-    char c;
+    wchar_t c;
     int arg_phase = 0;
     size_t last_arg_begin_idx = 0;
+    wchar_t delim = L'\0';
+    size_t last_default_begin_idx = 0;
     for (size_t i = 0; i < in.length; i++) {
         c = in.c_str[i];
+        //printf("c:'%lc'\tph:\t%d\n", c, arg_phase);
         switch (arg_phase) {
         case 0:
+            args_default[count] = nullstr;
             if (c == L' ' || c == L'\t' || c == L'\n' || c == L'\r') {
                 continue;
             } else if (c >= L'a' && c <= L'z' || c >= L'A' && c <= L'Z' || c >= L'0' && c <= L'9' || c == L'_') {
@@ -315,7 +253,14 @@ void parse_template_args(ht_template* t, string in, size_t n) {
         case 1:
             if (c == L' ' || c == L'\t' || c == L'\n' || c == L'\r') {
                 arg_phase = 2;
-                args_split[count++].length = i - last_arg_begin_idx;
+                args_split[count].length = i - last_arg_begin_idx;
+            } else if (c == L'?') {
+                arg_phase = 2;
+                args_split[count].length = i - last_arg_begin_idx;
+                args_flag[count] |= T_ARG_NULLABLE;
+            } else if (c == L'=') {
+                arg_phase = 3;
+                args_split[count].length = i - last_arg_begin_idx;
             } else if (c == L',') {
                 arg_phase = 0;
                 args_split[count++].length = i - last_arg_begin_idx;
@@ -330,17 +275,72 @@ void parse_template_args(ht_template* t, string in, size_t n) {
             if (c == L' ' || c == L'\t' || c == L'\n' || c == L'\r') {
 
             } else if (c == L',' || i == in.length - 1) {
+                count++;
                 arg_phase = 0;
             } else if (c == L'=') { // default arg
                 // for now throw exception, it will be implemented in the future
                 arg_phase = 3;
+            } else if (c == L'?') {
+                args_flag[count] |= T_ARG_NULLABLE;
             } else {
                 // TODO: throw excpetion
             }
             break;
         case 3:
-            puts("-----3-----");
+            //puts("-----3-----");
             // what now :3
+            if (c == L' ' || c == L'\t' || c == L'\n' || c == L'\r') {
+
+            } else if (c == L'"') {
+                args_default[count].c_str = in.c_str + i + 1;
+                last_default_begin_idx = i + 1;
+                delim = L'"';
+                arg_phase = 4;
+            } else if (c == L'\'') {
+                args_default[count].c_str = in.c_str + i + 1;
+                last_default_begin_idx = i + 1;
+                delim = L'\'';
+                arg_phase = 4;
+            } else if (c == L',') {
+                // TODO: handle exception
+                throw_error("Argument with default values must have a value", E_EXIT);
+            } else {
+                args_default[count].c_str = in.c_str + i;
+                last_default_begin_idx = i;
+                delim = L'\0';
+                arg_phase = 4;
+            }
+            break;
+        case 4:
+            // case4
+            //if (count == 2) puts("3->4");
+            if ((c == L' ' || c == L'\t' || c == L'\n' || c == L'\r') && delim == L'\0') {
+                args_default[count++].length = i - last_default_begin_idx;
+                arg_phase = 5;
+            } else if (c == L'"' && delim == L'"') {
+                args_default[count++].length = i - last_default_begin_idx;
+                arg_phase = 5;
+            } else if (c == L'\'' && delim == L'\'') {
+                args_default[count++].length = i - last_default_begin_idx;
+                arg_phase = 5;
+            } else if (c == L',' && delim == L'\0') {
+                args_default[count++].length = i - last_default_begin_idx;
+                arg_phase = 0;
+            } else if (i == in.length - 1 && delim == L'\0') {
+                args_default[count++].length = i - last_default_begin_idx + 1;
+                arg_phase = 0;
+            } else {
+
+            }
+            break;
+        case 5:
+            if (c == L' ' || c == L'\t' || c == L'\n' || c == L'\r') {
+
+            } else if (c == L',' || i == in.length - 1) {
+                arg_phase = 0;
+            } else {
+                // TODO: throw excpetion
+            }
             break;
         }
     }
@@ -349,14 +349,23 @@ void parse_template_args(ht_template* t, string in, size_t n) {
     VECT_FOR(args, i) {
         VECT_A(ht_template_arg, args)[i] = (ht_template_arg){
             str_cpy(args_split[i]),
-            nullstr,
-            0
+            str_isnull(args_default[i]) ? nullstr : str_cpy(args_default[i]),
+            args_flag[i]
         };
+#if DEBUG_MODE
+        ht_template_arg a = VECT_A(ht_template_arg, args)[i];
+        printf("\nname: |%ls|\ndefault: |%ls|\nnullable: %d\n-------\n",
+            a.name.c_str,
+            a.default_value.c_str,
+            flag_includes(a.flags, T_ARG_NULLABLE)
+        );
+#endif
     }
 
     t->args = args;
 
     free(args_split);
+    free(args_flag);
 
     /*for (size_t i = 0; i < n; i++) {
         printf("<<<<< \"%ls\" >>>>>\n", VECT_A(string, args)[i].c_str);
@@ -975,6 +984,7 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                                 }
                             } else if (constructing_constructor == 1) {
                                 // default args
+                                args_len++; //
                             } else {
                                 // TODO: throw exception
                             }
@@ -1314,10 +1324,19 @@ string process_template(htmw_context ctx, const ht_template* t, const wchar_t** 
     construct_name[t->name.length + 21] = '\0';
 
     lua_getglobal(L, construct_name);
+    //ht_template_arg* = t->args->data
     for (size_t i = 0; i < t->args->size; i++) {
-        char arg[4096];
-        wcstombs(arg, args[i], 4095);
-        lua_pushstring(L, arg);
+        if (args[i][0] != L'\b') {  // if arg value is not null
+            ht_template_arg a = VECT_A(ht_template_arg, t->args)[i];
+
+            char arg[4096];
+            //printf(">>>> %p\n", args[i]);
+            //printf("2) %p -> \"%ls\"\n", args[i], args[i]);
+            wcstombs(arg, args[i], 4095);
+            lua_pushstring(L, arg);
+        } else {
+            lua_pushnil(L);
+        }
     }
 
     if (check_lua(L, lua_pcall(L, t->args->size, 1, 0))) {
@@ -1382,7 +1401,6 @@ typedef struct {
 
 // takes a string of args (`in`) and outputs an ordered & filtered list of arg `name` + `value` in a txt_template based on the template (`t`)
 int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
-    const size_t MAX_ARG_NAME_LEN = 4096;
     list* argsl = list_new();
 
     int mode = 0;
@@ -1409,6 +1427,9 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
                 break;
             case 2: // default arg value and new attribute name
                 arg->value = nullstr;
+                //arg->value = str_cpy(!str_isnull(arg.default_value) ? arg.default_value)
+                //arg->value = str_new(2);
+                //str_append_ch(&arg->value, L'\b');
                 list_add(argsl, arg);
                 arg = (ht_template_arg_value*)malloc(sizeof(ht_template_arg_value));
                 arg->name = nullstr;
@@ -1516,12 +1537,16 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
             case 0:
                 break;
             case 1: // exit name mode
-                arg->value.length = i - last_ent - 1;
+                arg->name.length = i - last_ent;
                 mode = 2;
                 arg->value = nullstr;
+                //printf("i: %zu | le: %zu\n", i, last_ent);
+                //str_debug(arg->value);
                 list_add(argsl, arg);
                 break;
-            case 2: // ignore
+            case 2: // default arg value
+                arg->value = nullstr;
+                list_add(argsl, arg);
                 break;
             case 3: // ignore
                 break;
@@ -1561,6 +1586,15 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
         }
     }
 
+#if DEBUG_MODE
+    puts("---[ARGSL]---");
+    for (size_t i = 0; i < argsl->size; i++) {
+        ht_template_arg_value* a = list_get(argsl, i);
+        printf("- %ls\t\t%ls\n", str_cpy(a->name).c_str, str_cpy(a->value).c_str);
+    }
+    puts("---[ END ]---");
+#endif
+
     list* args = list_new(); // sorted & filtered output list
     vect* a = t->args;
     VECT_FOR(a, i) {
@@ -1571,6 +1605,9 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
 
             if (!wcsncmp(VECT_A(ht_template_arg, a)[i].name.c_str, o->name.c_str, o->name.length)) {
                 found = 1;
+                if (str_isnull(o->value)) {
+                    o->value = VECT_A(ht_template_arg, a)[i].default_value;
+                }
                 list_add(args, o);
                 list_remove(argsl, j);
                 out->len += o->value.length + 1;
@@ -1582,6 +1619,46 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
         if (!found) {
             // TODO: throw exception
             // FIXME: duplicate names are not handled properly, fix this!!!
+
+            //printf("i: %zu\n", i);
+            ht_template_arg arg = VECT_A(ht_template_arg, a)[i];
+            if (!str_isnull(arg.default_value)) {
+                if (flag_includes(arg.flags, T_ARG_NULLABLE)) {
+                    ht_template_arg_value* o = (ht_template_arg_value*)malloc(sizeof(ht_template_arg_value));
+                    o->name = str_cpy(arg.name); // ??? str_cpy?
+                    //o->value = nullstr;
+                    string v = str_new(2);
+                    str_append_ch(&v, L'\b');
+                    o->value = v;
+                    out->len += o->value.length + 1;
+                    //puts(VECT_A(ht_template_arg, a)[i].name.c_str);
+                    //puts("1a");
+                    list_add(args, o);
+                    continue;
+                } else {
+                    ht_template_arg_value* o = (ht_template_arg_value*)malloc(sizeof(ht_template_arg_value));
+                    o->name = str_cpy(arg.name); // ??? str_cpy?
+                    o->value = str_cpy(arg.default_value);
+                    out->len += o->value.length + 1;
+                    //puts(VECT_A(ht_template_arg, a)[i].name.c_str);
+                    //puts("1b");
+                    list_add(args, o);
+                    continue;
+                }
+            } else if (flag_includes(arg.flags, T_ARG_NULLABLE)) {
+                ht_template_arg_value* o = (ht_template_arg_value*)malloc(sizeof(ht_template_arg_value));
+                o->name = str_cpy(arg.name); // ??? str_cpy?
+                //o->value = nullstr;
+                string v = str_new(2);
+                str_append_ch(&v, L'\b');
+                o->value = v;
+                out->len += o->value.length + 1;
+                //puts(VECT_A(ht_template_arg, a)[i].name.c_str);
+                //puts("2");
+                list_add(args, o);
+                continue;
+            }
+
             throw_error("Widget argument(s) missing", E_EXIT);
             ln = argsl->head;
             for (size_t j = 0; j < argsl->size; j++) {
@@ -1933,6 +2010,8 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
         }
     }
 
+    //for (size_t i = 0; i < )
+
     // pack all the info
     out.ground = ground;
     out.args = (wchar_t*)malloc(args_block_size * sizeof(wchar_t));
@@ -1964,6 +2043,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                     out.arg_shifts[s_shifs_idx++] = s_idx;
                     ln = ln->next;
                     free(o);
+                    //printf("1) %p -> \"%ls\"\n", out.args + s_idx - 1, out.args[s_idx - 1]);
                     //str_delete(s); do NOT delete
                 }
             }
@@ -2157,7 +2237,7 @@ int main(int argc, char** argv) {
                 config.output_name = argv[++i];
                 break;
             case 'v':
-                printf("HTMW vT.2\nWoxell\n\n");
+                printf("HTMW vT.3\nWoxell\n\n");
                 show_ver = 1;
                 break;
             default:
