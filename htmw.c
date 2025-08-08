@@ -1,5 +1,5 @@
 /**
- * (c) HTMW vT.3 by Woxell.co
+ * (c) HTMW vT.4 by Woxell.co
  * 
  * [WARNING]
  * The current version is a test version, it's unstable and there are known memory leaks and unhandled errors.
@@ -831,6 +831,7 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
 
     int comment_mode = 0;
     int php_mode = 0;
+    size_t ntxt_out_count = 0;
     size_t last_idx = 0;
     htmw_mode mode = h_null;
 
@@ -876,8 +877,15 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                     string name = str_new(128);
                     size_t i = 0;
                     idx += 10;
+                    int sty = 0;
                     for (; (c = in.c_str[idx + i]) != L'\0'; i++) {
                         if (c >= L'a' && c <= L'z' || c >= L'A' && c <= L'Z' || c >= L'0' && c <= L'9' || c == L'_'/* || c == L'-'*/) {
+                            if (!sty && !wcsncmp(in.c_str + idx + i, L"ninner", 6) && (in.c_str[idx + i + 6] == L' ' || in.c_str[idx + i + 6] == L'\n' || in.c_str[idx + i + 6] == L'\t' || in.c_str[idx + i + 6] == L'\r')) {
+                                t->ninner = 1;
+                                idx += 6;
+                                continue;
+                            }
+                            sty = 1;
                             str_append_ch(&name, c);
                         } else if (str_isempty(name)) {
                             continue;
@@ -1052,12 +1060,22 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                     //str_append(&post_in, in.c_str + last_idx, idx - last_idx - 1);
                     mode = h_comment;
                     goto pre_process_for_switch_continue;
-                } else {
+                } else if (!wcsncmp(in.c_str + idx + 1, L"@ntxt>", 6)) {
+                    ntxt_out_count++;
+                    idx += 6;
+                    goto pre_process_for_switch_continue;
+                } else if (!wcsncmp(in.c_str + idx + 1, L"/@ntxt>", 7)) {
+                    if (ntxt_out_count > 0) {
+                        ntxt_out_count--;
+                    }
+                    idx += 7;
+                    goto pre_process_for_switch_continue;
+                } else if (ntxt_out_count == 0) {
                     str_append_ch(&post_in, in.c_str[idx])
                 }
                 //printf("a");
                 //map_set(templates, "")
-            } else {
+            } else if (ntxt_out_count == 0) {
                 str_append_ch(&post_in, in.c_str[idx])
             }
         pre_process_for_switch_continue:;
@@ -1755,6 +1773,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
 
             //int naming = 1;
             int ninner = 0;
+            int dninner = 0;
             ht_template* t = NULL;
             string name_buffer = nullstr;
             string args_buffer = nullstr;
@@ -1820,6 +1839,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                     //putc(':', stdout);
                     if (in.c_str[idx + 2 + i] != L'>') break;
                     ninner = 1;
+                    dninner = 1;
                     if (!i) {
                         break;
                     } else {
@@ -1882,6 +1902,12 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                         }
                     }
                     // check if ninner mode
+                    if (t->ninner) {
+                        ninner = 1;
+                        *inner = nullstr;
+                        goto widget_name_to_arg_parse;
+                    }
+                    ///////////////////////
                     inner->c_str = in.c_str + idx + 3 + i;
                     break;
                 } else {
@@ -1916,7 +1942,9 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                     break;
                 case L'>':
                     if (str_bounds == L'\0') {
-                        inner->c_str = in.c_str + idx + 2 + i;
+                        if (!ninner) {
+                            inner->c_str = in.c_str + idx + 2 + i;
+                        }
                         goto widget_arg_parse_to_arg_process;
                     }
                     break;
@@ -1940,8 +1968,8 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                 // if widget doesn't have a body or is a ninner e.g. <widget/>
                 inners_block_size++;
                 list_add(inners_list, inner);
-                difference += i + 3;
-                idx += i + 2;
+                difference += i + 2 + dninner;
+                idx += i + 1 + dninner;
                 continue;
             }
             b = i;
@@ -1981,7 +2009,8 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                         if (after == L'/') {
                             //nt_count++;
                         } else if (after == L' ' || after == L'\n' || after == L'\t' || after == L'>' || after == L'\r') {
-                            int is_ninner = 0;
+                            //int is_ninner = 0;
+                            int is_ninner = t->ninner;
                             for (size_t j = 0; (c = in.c_str[idx + 1 + i + j]) != L'>'; j++) {
                                 if (c == L'/') {
                                     is_ninner = 1;
@@ -2237,7 +2266,7 @@ int main(int argc, char** argv) {
                 config.output_name = argv[++i];
                 break;
             case 'v':
-                printf("HTMW vT.3\nWoxell\n\n");
+                printf("HTMW vT.4\nWoxell\n\n");
                 show_ver = 1;
                 break;
             default:
