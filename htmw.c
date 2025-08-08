@@ -1902,7 +1902,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                         }
                     }
                     // check if ninner mode
-                    if (t->ninner) {
+                    if (t != NULL && t->ninner) {
                         ninner = 1;
                         *inner = nullstr;
                         goto widget_name_to_arg_parse;
