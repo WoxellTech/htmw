@@ -1774,6 +1774,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
             //int naming = 1;
             int ninner = 0;
             int dninner = 0;
+            int aninner = 0;
             ht_template* t = NULL;
             string name_buffer = nullstr;
             string args_buffer = nullstr;
@@ -1829,6 +1830,14 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                                 //printf("t1: %p\tpos: %zu\tname: %ls\n", t, fl->pos, t->name.c_str);
                                 //printf("t1r_idx: %zu\n", fl->pos);
 #endif
+                                // check if ninner mode
+                                //printf("ninner? %d\n", t->ninner);
+                                if (t != NULL && t->ninner) {
+                                    ninner = 1;
+                                    aninner = 1;
+                                    *inner = nullstr;
+                                }
+                                ///////////////////////
                                 goto widget_name_to_arg_parse;
                             } else {
                                 mnt = mnt->next;
@@ -1904,12 +1913,13 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                     // check if ninner mode
                     if (t != NULL && t->ninner) {
                         ninner = 1;
+                        aninner = 1;
                         *inner = nullstr;
                         goto widget_name_to_arg_parse;
                     }
                     ///////////////////////
                     inner->c_str = in.c_str + idx + 3 + i;
-                    break;
+                    ;break;
                 } else {
                     //putc('@', stdout);
                     //printf("c(%ld, '%lc')", (long int)c, c);
@@ -1937,6 +1947,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                     break;
                 case L'/':
                     if (str_bounds == L'\0') {
+                        dninner = 1;
                         goto widget_arg_parse_to_arg_process;
                     }
                     break;
@@ -1964,12 +1975,21 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
             }
             args_count += argsl->size;
             args_block_size += argsln.len;
+            //printf("str_isnull: %d\n", str_isnull(*inner));
+            //str_debug(*inner);
             if (str_isnull(*inner)) {
                 // if widget doesn't have a body or is a ninner e.g. <widget/>
                 inners_block_size++;
                 list_add(inners_list, inner);
-                difference += i + 2 + dninner;
-                idx += i + 1 + dninner;
+                /*size_t d = 0;
+                wchar_t c;
+                //wchar_t 
+                for (size_t i = 0; i < in.length; i++) {
+
+                }*/
+                /////printf("%zu + 3 - %d + %d\n", i, aninner, dninner * aninner);
+                difference += i + 3 - aninner + (dninner * aninner);
+                idx += i + 2 - aninner + (dninner * aninner);
                 continue;
             }
             b = i;
