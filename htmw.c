@@ -922,6 +922,8 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                                 constructing_constructor = 1;
                                 constructor_begin_idx_args = idx + i + 1;
                                 args.c_str = in.c_str + constructor_begin_idx_args;
+                            } else if (constructing_constructor == 1) {
+                                args_len++;
                             } else {
                                 // TODO: throw exception
                             }
@@ -930,12 +932,17 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                         {
                             if (constructing_constructor == 1) {
                                 args_len++;
-                                args_count++;
+                                if (in_str_type == L'\0')
+                                    args_count++;
                             }
                         } break;
                         case L')':
                         {
                             if (constructing_constructor == 1) {
+                                if (in_str_type != L'\0') {
+                                    args_len++;
+                                    break;
+                                }
                                 constructing_constructor = 2;
                                 args.length = args_len;
                                 args.size = args_len + 1;
@@ -952,8 +959,11 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                                 constructor_begin_idx_impl = idx + i + 1;
                                 impl_idx_begin = i;
                                 impl.c_str = in.c_str + constructor_begin_idx_impl;
+                                in_str_type = L'\0';
                             } else if (constructing_constructor == 3 && in_str_type == L'\0' && !lua_comment_mode) {
                                 impl_inner_braces++;
+                            } else if (constructing_constructor == 1) {
+                                args_len++;
                             } else {
                                 // TODO: throw exception
                             }
@@ -969,6 +979,8 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                                 } else {
                                     impl_inner_braces--;
                                 }
+                            } else if (constructing_constructor == 1) {
+                                args_len++;
                             } else {
                                 // TODO: throw exception
                             }
@@ -976,7 +988,7 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                         case L'\\':
                         {
                             if (constructing_constructor == 3) {
-                                if (in_str_type != '\0') {
+                                if (in_str_type != L'\0') {
                                     in_str_backslashing = !in_str_backslashing;
                                 }
                             }
@@ -988,10 +1000,15 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                                 if (in_str_type == L'\0') {
                                     in_str_type = c;
                                 } else if (in_str_type == c && !in_str_backslashing) {
-                                    in_str_type = '\0';
+                                    in_str_type = L'\0';
                                 }
                             } else if (constructing_constructor == 1) {
                                 // default args
+                                if (in_str_type == L'\0') {
+                                    in_str_type = c;
+                                } else if (in_str_type == c/* && !in_str_backslashing*/) {
+                                    in_str_type = L'\0';
+                                }
                                 args_len++; //
                             } else {
                                 // TODO: throw exception
@@ -1018,6 +1035,7 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                         case L'>':
                         {
                             if (constructing_constructor == 1) {
+                                args_len++;
                                 // TODO: throw exception
                             } else if (constructing_constructor != 3) {
                                 //printf("_____--------___%lc____%u\n\n", c, idx + i);
