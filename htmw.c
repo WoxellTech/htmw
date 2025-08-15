@@ -1,5 +1,5 @@
 /**
- * (c) HTMW vT.4 by Woxell.co
+ * (c) HTMW vT.5 by Woxell.co
  * 
  * [WARNING]
  * The current version is a test version, it's unstable and there are known memory leaks and unhandled errors.
@@ -94,9 +94,13 @@ typedef struct {
     flag_t flags;                               // nullable or double ass
 } ht_template_arg;
 
+#define T_ARGV_STRLT        (1 << 0)
+#define T_ARGV_VALUE        (1 << 1)
+
 typedef struct {
     string name;
     string value;
+    flag_t flags;
 } ht_template_arg_value;
 
 typedef struct {
@@ -126,11 +130,14 @@ typedef union {
     ht_template* template;
 } ht_any;
 
+#define CTX_HEAD    (1 << 0)
+
 typedef struct {
     u_map* includes;                            // map of strings (path, content) global includes are prefixed with `>`
     u_map* templates;                           // (name, ht_template)
     string input;
     lua_State* L;
+    flag_t flags;
 } htmw_context;
 
 typedef struct {
@@ -1020,6 +1027,8 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                             if (constructing_constructor == 3) {
                                 if (lua_comment_mode == 1) {
                                     lua_comment_mode = 0;
+                                } else if (in_str_type == L'"' || in_str_type == L'\'') {
+                                    in_str_type = L'\0';
                                 }
                             }
                         }
@@ -1050,18 +1059,29 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
                                 if (!args_count) args_count++;
                                 args_len++;
                             } else if (constructing_constructor == 3) {
-                                if (c == L'-' && !lua_comment_mode) {
+                                if (c == L'-' && !lua_comment_mode && in_str_type == L'\0') {
                                     if (!wcsncmp(in.c_str + idx + i, L"--[[", 4)) {
                                         //puts("lua_comment_mode = 2");
+                                        i += 3;
                                         lua_comment_mode = 2;
                                     } else if (!wcsncmp(in.c_str + idx + i, L"--", 2)) {
                                         //puts("lua_comment_mode = 1");
+                                        i++;
                                         lua_comment_mode = 1;
                                     }
                                 } else {
-                                    if (c == L']' && lua_comment_mode == 2 && !wcsncmp(in.c_str + idx + i, L"]]", 2)) {
-                                        //puts("lua_comment_mode = 0");
-                                        lua_comment_mode = 0;
+                                    if (c == L']' && !wcsncmp(in.c_str + idx + i, L"]]", 2)) {
+                                        if (lua_comment_mode == 2) {
+                                            i++;
+                                            //puts("lua_comment_mode = 0");
+                                            lua_comment_mode = 0;
+                                        } else if (in_str_type = L']' && !in_str_backslashing) {
+                                            i++;
+                                            in_str_type = L'\0';
+                                        }
+                                    } else if (c == L'[' && !wcsncmp(in.c_str + idx + i, L"[[", 2) && !lua_comment_mode) {
+                                        i++;
+                                        in_str_type = L'[';
                                     }
                                 }
                             }
@@ -1142,11 +1162,16 @@ htmw_context htmw_preprocess(lua_State* L, string in, htmw_context* ectx) {
             break;
         }
     }
+    flag_t flags = 0;
+    if (ectx == NULL) {
+        flags |= CTX_HEAD;
+    }
     return (htmw_context) {
         includes,
         templates,
         post_in,
-        L
+        L,
+        flags
     };
 }
 
@@ -1362,7 +1387,35 @@ string process_template(htmw_context ctx, const ht_template* t, const wchar_t** 
     lua_getglobal(L, construct_name);
     //ht_template_arg* = t->args->data
     for (size_t i = 0; i < t->args->size; i++) {
-        if (args[i][0] != L'\b') {  // if arg value is not null
+        if (args[i][0] == L'\b') {
+            lua_pushnil(L);
+        } else if (args[i][0] == L'\r') {
+            //char* lin = (char*)malloc((wlin.length + 1 + 16 + 1 - 1) * sizeof(char)); // len + null terminator + "return tostring(" + ")" - "\r"
+            size_t lin_len = wcslen(args[i]);
+            char* lin = (char*)malloc((lin_len + 9 + 1) * sizeof(char));//printf("-----------|%ls|---\n", args[i] + 1);
+            lin[0] = 'r';
+            lin[1] = 'e';
+            lin[2] = 't';
+            lin[3] = 'u';
+            lin[4] = 'r';
+            lin[5] = 'n';
+            lin[6] = ' ';
+            lin[7] = '(';
+            wcstombs(lin + 8, args[i] + 1, lin_len - 1);
+            lin[lin_len + 8 - 1] = ')';
+            lin[lin_len + 9 - 1] = '\0';
+            int r = luaL_loadstring(L, lin);
+            if (check_lua(L, r)) {
+                if (lua_pcall(L, 0, 1, 0) == LUA_OK) {
+                    // ...
+                } else {
+                    throw_error("Lua pcall is not ok", E_EXIT);
+                }
+            } else {
+                throw_error("Lua status is not ok", E_EXIT);
+            }
+            free(lin);
+        } else {  // if arg value is not null
             ht_template_arg a = VECT_A(ht_template_arg, t->args)[i];
 
             char arg[4096];
@@ -1370,8 +1423,6 @@ string process_template(htmw_context ctx, const ht_template* t, const wchar_t** 
             //printf("2) %p -> \"%ls\"\n", args[i], args[i]);
             wcstombs(arg, args[i], 4095);
             lua_pushstring(L, arg);
-        } else {
-            lua_pushnil(L);
         }
     }
 
@@ -1436,7 +1487,7 @@ typedef struct {
 } txt_list_tot_len;
 
 // takes a string of args (`in`) and outputs an ordered & filtered list of arg `name` + `value` in a txt_template based on the template (`t`)
-int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
+int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out, lua_State* L) {
     list* argsl = list_new();
 
     int mode = 0;
@@ -1445,6 +1496,10 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
     wchar_t value_bounds = L'\0';
     size_t last_ent = 0;
     int eq = 0;
+    char value_mode = 0;    // 0: default, 1: ``, 2: {} /// unused????
+    unsigned char neutral_mode; // bool: escaping in strlt or commenting in lua
+    size_t nest = 0;
+    wchar_t lua_str_mode = L'\0';
     for (size_t i = 0; i <= in.length; i++) {
         //printf("i: %zu\n", i);
         wchar_t c = i < in.length ? in.c_str[i] : L'\0';
@@ -1454,7 +1509,9 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
                 arg = (ht_template_arg_value*)malloc(sizeof(ht_template_arg_value));
                 arg->name = nullstr;
                 arg->value = nullstr;
+                arg->flags = 0;
                 arg->name.c_str = in.c_str + i;
+                neutral_mode = 0;
                 last_ent = i;
                 mode = 1;
                 break;
@@ -1470,7 +1527,9 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
                 arg = (ht_template_arg_value*)malloc(sizeof(ht_template_arg_value));
                 arg->name = nullstr;
                 arg->value = nullstr;
+                arg->flags = 0;
                 arg->name.c_str = in.c_str + i;
+                neutral_mode = 0;
                 last_ent = i;
                 mode = 1;
                 break;
@@ -1481,9 +1540,284 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
                 mode = 4;
                 break;
             case 4: // value
+                if (flag_includes(arg->flags, T_ARGV_STRLT)) {
+                    if (!neutral_mode) {
+                        str_append_ch(&arg->value, c);
+                    } else {
+                        switch (c)
+                        {
+                        case L'n':
+                            str_append_ch(&arg->value, L'\n');
+                            break;
+                        case L't':
+                            str_append_ch(&arg->value, L'\t');
+                            break;
+                        case L'r':
+                            str_append_ch(&arg->value, L'\r');
+                            break;
+                        case L'v':
+                            str_append_ch(&arg->value, L'\v');
+                            break;
+                        case L'f':
+                            str_append_ch(&arg->value, L'\f');
+                            break;
+                        case L'a':
+                            str_append_ch(&arg->value, L'\a');
+                            break;
+                        default:
+                            str_append_ch(&arg->value, c);
+                            break;
+                        }
+                    }
+                    neutral_mode = 0;
+                }
                 break;
             }
         } else switch (c) {
+        case L'[':
+            switch (mode) {
+            case 0: // !
+                // TODO: throw exception
+                throw_error("Unexpected character `[` in widget tag, arg name expected", E_EXIT);
+                break;
+            case 1: // name!
+                // TODO: throw exception
+                throw_error("Unexpected character `[` in widget tag, in arg name", E_EXIT);
+                break;
+            case 2: // name !
+                // TODO: throw exception
+                throw_error("Unexpected character `[ in widget tag, arg name or `=` expected", E_EXIT);
+                break;
+            case 3: // name=!
+                value_bounds = L'\0';
+                arg->value.c_str = in.c_str + i;
+                last_ent = i;
+                mode = 4;
+                break;
+            case 4: // name="!"
+                if (flag_includes(arg->flags, T_ARGV_VALUE) && !neutral_mode && !wcsncmp(in.c_str + i, L"[[", 2)) {
+                    if (lua_str_mode == L'\0') {
+                        i++;
+                        lua_str_mode = L']';
+                    }
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)) {
+                    str_append_ch(&arg->value, L']');
+                }
+                break;
+            }
+            break;
+        case L']':
+            switch (mode) {
+            case 0: // !
+                // TODO: throw exception
+                throw_error("Unexpected character `]` in widget tag, arg name expected", E_EXIT);
+                break;
+            case 1: // name!
+                // TODO: throw exception
+                throw_error("Unexpected character `]` in widget tag, in arg name", E_EXIT);
+                break;
+            case 2: // name !
+                // TODO: throw exception
+                throw_error("Unexpected character `]` in widget tag, arg name or `=` expected", E_EXIT);
+                break;
+            case 3: // name=!
+                value_bounds = L'\0';
+                arg->value.c_str = in.c_str + i;
+                last_ent = i;
+                mode = 4;
+                break;
+            case 4: // name="!"
+                if (neutral_mode == 3) {
+                    neutral_mode = 0;
+                    break;
+                } else if (flag_includes(arg->flags, T_ARGV_VALUE) && !wcsncmp(in.c_str + i, L"]]", 2)) {
+                    if (neutral_mode == 2) {
+                        i++;
+                        neutral_mode = 0;
+                    } else if (lua_str_mode == L']') {
+                        i++;
+                        lua_str_mode = L'\0';
+                    }
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)) {
+                    str_append_ch(&arg->value, L']');
+                }
+                break;
+            }
+            break;
+        case L'-':
+            switch (mode) {
+            case 0: // !
+                // TODO: throw exception
+                throw_error("Unexpected character `-` in widget tag, arg name expected", E_EXIT);
+                break;
+            case 1: // name!
+                // TODO: throw exception
+                throw_error("Unexpected character `-` in widget tag, in arg name", E_EXIT);
+                break;
+            case 2: // name !
+                // TODO: throw exception
+                throw_error("Unexpected character `-` in widget tag, arg name or `=` expected", E_EXIT);
+                break;
+            case 3: // name=!
+                value_bounds = L'\0';
+                arg->value.c_str = in.c_str + i;
+                last_ent = i;
+                mode = 4;
+                break;
+            case 4: // name="!"
+                if (lua_str_mode != L'\0') {
+                    break;
+                }
+                if (flag_includes(arg->flags, T_ARGV_VALUE) && !neutral_mode && lua_str_mode == L'\0') {
+                    if (!wcsncmp(in.c_str + i, L"--[[", 4)) {
+                        neutral_mode = 2;
+                        i += 3;
+                    } else if (!wcsncmp(in.c_str + i, L"--", 2)) {
+                        neutral_mode = 1;
+                        i++;
+                    }
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)) {
+                    str_append_ch(&arg->value, L'-');
+                }
+                break;
+            }
+            break;
+        case L'\\':
+            switch (mode) {
+            case 0: // !
+                // TODO: throw exception
+                throw_error("Unexpected character `\\` in widget tag, arg name expected", E_EXIT);
+                break;
+            case 1: // name!
+                // TODO: throw exception
+                throw_error("Unexpected character `\\` in widget tag, in arg name", E_EXIT);
+                break;
+            case 2: // name !
+                // TODO: throw exception
+                throw_error("Unexpected character `\\` in widget tag, arg name or `=` expected", E_EXIT);
+                break;
+            case 3: // name=!
+                value_bounds = L'\0';
+                arg->value.c_str = in.c_str + i;
+                last_ent = i;
+                mode = 4;
+                break;
+            case 4: // name="!"
+                if (flag_includes(arg->flags, T_ARGV_STRLT)) {
+                    neutral_mode = !neutral_mode;
+                    if (!neutral_mode) {
+                        str_append_ch(&arg->value, L'\\');
+                    }
+                } else if (flag_includes(arg->flags, T_ARGV_VALUE) && lua_str_mode != L'\0') {
+                    neutral_mode = (!neutral_mode) * 3;
+                }
+                break;
+            }
+            break;
+        case L'}':
+        switch (mode) {
+            case 0: // "value"
+                // TODO: throw exception
+                throw_error("Constructor argument values should have a name", E_EXIT);
+                break;
+            case 1: // name"
+                // TODO: throw exception
+                throw_error("Illegal constructor argument value begin", E_EXIT);
+                break;
+            case 2: // name "value"
+                // TODO: throw exception
+                break;
+            case 3: // enter value with quotes
+                value_bounds = L'\0';
+                arg->value.c_str = in.c_str + i;
+                last_ent = i;
+                mode = 4;
+                break;
+            case 4: // exit value with quotes?
+                //printf("%d, %d, %d\n", neutral_mode, lua_str_mode, nest);
+                if (c == value_bounds && !neutral_mode && lua_str_mode == L'\0') {
+                    if (!nest) {
+                        value_mode = 0;
+                        arg->value.length = i - last_ent - 1;
+                        list_add(argsl, arg);
+                        mode = 0;
+                    } else {
+                        nest--;
+                    }
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)) {
+                    str_append_ch(&arg->value, L'}');
+                    neutral_mode = 0;
+                }
+                break;
+            }
+            break;
+        case L'{':
+            switch (mode) {
+            case 0: // "value"
+                // TODO: throw exception
+                throw_error("Constructor argument values should have a name", E_EXIT);
+                break;
+            case 1: // name"
+                // TODO: throw exception
+                throw_error("Illegal constructor argument value begin", E_EXIT);
+                break;
+            case 2: // name "value"
+                // TODO: throw exception
+                break;
+            case 3: // enter value with quotes
+                value_bounds = L'}';
+                value_mode = 2;
+                arg->flags |= T_ARGV_VALUE;
+                arg->value.c_str = in.c_str + i + 1;
+                last_ent = i;
+                mode = 4;
+                break;
+            case 4: // exit value with quotes?
+                if (flag_includes(arg->flags, T_ARGV_VALUE) && !neutral_mode && lua_str_mode == L'\0') {
+                    nest++;
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)) {
+                    str_append_ch(&arg->value, L'{');
+                    neutral_mode = 0;
+                }
+                break;
+            }
+            break;
+        case L'`':
+            switch (mode) {
+            case 0: // "value"
+                // TODO: throw exception
+                throw_error("Constructor argument values should have a name", E_EXIT);
+                break;
+            case 1: // name"
+                // TODO: throw exception
+                throw_error("Illegal constructor argument value begin", E_EXIT);
+                break;
+            case 2: // name "value"
+                // TODO: throw exception
+                break;
+            case 3: // enter value with quotes
+                value_bounds = L'`';
+                value_mode = 1;
+                arg->flags |= T_ARGV_STRLT;
+                arg->value = str_new(in.length - i);
+                last_ent = i;
+                mode = 4;
+                break;
+            case 4: // exit value with quotes?
+                if (c == value_bounds && !neutral_mode) {
+                    value_mode = 0;
+                    //arg->value.length = i - last_ent - 1;
+                    list_add(argsl, arg);
+                    mode = 0;
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)) {
+                    str_append_ch(&arg->value, L'`');
+                    neutral_mode = 0;
+                } else if (flag_includes(arg->flags, T_ARGV_VALUE) && neutral_mode == 3) {
+                    neutral_mode = 0;
+                }
+                break;
+            }
+            break; /// ^^^ NEW ^^^
         case L'\'':
         case L'"':
             switch (mode) {
@@ -1509,6 +1843,16 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
                     arg->value.length = i - last_ent - 1;
                     list_add(argsl, arg);
                     mode = 0;
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)) {
+                    str_append_ch(&arg->value, c);
+                } else if (flag_includes(arg->flags, T_ARGV_VALUE)) {
+                    if (lua_str_mode == L'\0' && !neutral_mode) {
+                        lua_str_mode = c;
+                    } else if (lua_str_mode == c && neutral_mode != 3) {
+                        lua_str_mode = L'\0';
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
                 }
                 break;
             }
@@ -1530,11 +1874,22 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
             case 3: // ignore
                 
                 break;
-            case 4: // exit value without quotes
-                if (value_bounds == L'\0') {
+            case 4:
+                if (value_bounds == L'\0') { // exit value without quotes
                     arg->value.length = i - last_ent;
                     list_add(argsl, arg);
                     mode = 0;
+                } else if (flag_includes(arg->flags, T_ARGV_VALUE)) { // exit single line lua comment mode
+                    if (neutral_mode == 1 && c == L'\n') {
+                        neutral_mode = 0;
+                    } else if ((lua_str_mode == L'"' || lua_str_mode == L'\'') && c == L'\n') {
+                        lua_str_mode = L'\0';
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)/* && !neutral_mode*/) {
+                    str_append_ch(&arg->value, c);
+                    neutral_mode = 0;
                 }
                 break;
             }
@@ -1557,10 +1912,18 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
                 throw_error("Unexpected symbol '=' in widget tag", E_EXIT);
                 break;
             case 4: // name="=" or // name= =
-                if (c != L'\0') {
-                    arg->value.length = i - last_ent;
+                //if (c != L'\0') {
+                if (value_bounds != L'\0') {
+                    /*arg->value.length = i - last_ent;
                     list_add(argsl, arg);
-                    mode = 0;
+                    mode = 0;*/
+                    if (flag_includes(arg->flags, T_ARGV_VALUE) && neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
+                    break;
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)/* && !neutral_mode*/) {
+                    str_append_ch(&arg->value, L'=');
+                    neutral_mode = 0;
                 } else {
                     // TODO: throw exception
                     throw_error("Unexpected symbol '=' in widget tag", E_EXIT);
@@ -1591,6 +1954,9 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
                     arg->value.length = i - last_ent;
                     list_add(argsl, arg);
                     mode = 0;
+                } else if (flag_includes(arg->flags, T_ARGV_STRLT)/* && !neutral_mode*/) {
+                    str_append_ch(&arg->value, L'\0');
+                    neutral_mode = 0;
                 }
                 break;
             }
@@ -1599,15 +1965,16 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
             switch (mode) {
             case 0: // !
                 // TODO: throw exception
-                throw_error("Unexpected symbol in widget tag", E_EXIT);
+                //printf("'%lc'\n", c);
+                throw_error("Unexpected symbol in widget tag, arg name expected", E_EXIT);
                 break;
             case 1: // name!
                 // TODO: throw exception
-                throw_error("Unexpected symbol in widget tag", E_EXIT);
+                throw_error("Unexpected symbol in widget tag, in arg name", E_EXIT);
                 break;
             case 2: // name !
                 // TODO: throw exception
-                throw_error("Unexpected symbol in widget tag", E_EXIT);
+                throw_error("Unexpected symbol in widget tag, arg name or `=` expected", E_EXIT);
                 break;
             case 3: // name=!
                 value_bounds = L'\0';
@@ -1616,6 +1983,12 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
                 mode = 4;
                 break;
             case 4: // name="!"
+                if (flag_includes(arg->flags, T_ARGV_STRLT)/* && !neutral_mode*/) {
+                    str_append_ch(&arg->value, c);
+                    neutral_mode = 0;
+                } else if (flag_includes(arg->flags, T_ARGV_VALUE) && neutral_mode == 3) {
+                    neutral_mode = 0;
+                }
                 break;
             }
             break;
@@ -1643,6 +2016,57 @@ int txt_parse_args(ht_template* t, const string in, txt_list_tot_len* out) {
                 found = 1;
                 if (str_isnull(o->value)) {
                     o->value = VECT_A(ht_template_arg, a)[i].default_value;
+                } else if (flag_includes(o->flags, T_ARGV_VALUE)) {
+                    //o->value = str_new(2);
+                    //str_append_ch(&o->value, L'\r');
+                    //string wlin = str_cpy(o->value);
+                    string wlin = str_new(o->value.length + 2);
+                    str_append_ch(&wlin, L'\r');
+                    str_append(&wlin, o->value.c_str, o->value.length);
+                    o->value = wlin;
+                    //printf("{%ls}\n", o->value.c_str + 1);
+                    /*char* lin = (char*)malloc((wlin.length + 1 + 16 + 1 - 1) * sizeof(char)); // len + null terminator + "return tostring(" + ")" - "/r"
+                    lin[0] = 'r';
+                    lin[1] = 'e';
+                    lin[2] = 't';
+                    lin[3] = 'u';
+                    lin[4] = 'r';
+                    lin[5] = 'n';
+                    lin[6] = ' ';
+                    lin[7] = 't';
+                    lin[8] = 'o';
+                    lin[9] = 's';
+                    lin[10] = 't';
+                    lin[11] = 'r';
+                    lin[12] = 'i';
+                    lin[13] = 'n';
+                    lin[14] = 'g';
+                    lin[15] = '(';
+                    wcstombs(lin + 16, wlin.c_str, wlin.length);
+                    lin[wlin.length + 16] = ')';
+                    lin[wlin.length + 17] = '\0';
+                    int r = luaL_loadstring(L, lin);
+                    if (check_lua(L, r)) {
+                        if (lua_pcall(L, 0, 1, 0) == LUA_OK) {
+                            const char *lout = lua_tostring(L, -1);
+                            size_t lout_len = strlen(lout);
+                            string wlout = str_new(lout_len + 1);
+                            mbstowcs(wlout.c_str, lout, lout_len);
+                            wlout.c_str[lout_len] = L'\0';
+                            wlout.length = lout_len;
+                            free(lin);
+                            //free(o->data);
+                            o->value = wlout;
+
+                            lua_pop(L, 1); // pop the result off the stack
+                        } else {
+                            throw_error("Lua pcall is not ok", E_EXIT);
+                        }
+                    } else {
+                        throw_error("Lua status is not ok", E_EXIT);
+                    }*/
+                    
+                    //lua_pop(L, 1);
                 }
                 list_add(args, o);
                 list_remove(argsl, j);
@@ -1785,7 +2209,25 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
         }
 
         if (c == L'<') {
-            in.c_str + idx + 1;
+            //in.c_str + idx + 1;
+
+            // force native tags
+            //printf("ctx.flags: %d\n", ctx.flags);
+            //printf("idx: %zu\n", idx);
+            /*if (in.c_str[idx + 1] == L'#') {
+                if (flag_includes(ctx.flags, CTX_HEAD)) {
+                    str_append_ch(&ground, L'<');
+                    idx++;
+                    continue;
+                } else puts("n");
+            } else if (in.c_str[idx + 1] == L'/' && in.c_str[idx + 2] == L'#') {
+                if (flag_includes(ctx.flags, CTX_HEAD)) {
+                    str_append_ch(&ground, L'<');
+                    str_append_ch(&ground, L'/');
+                    idx += 2;
+                    continue;
+                } else puts("n");
+            }*/
             wchar_t c;
             size_t i;
 
@@ -1953,28 +2395,153 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
             args_buffer.c_str = in.c_str + idx + 1 + i;
             size_t b = i;
             wchar_t str_bounds = L'\0';
+            size_t nest = 0;
+            wchar_t lua_str_mode = L'\0';
+            unsigned char neutral_mode = 0;
             for (; (c = in.c_str[idx + 1 + i]) != L'\0'; i++) {
                 switch (c) {
+                case L'[':
+                    if (str_bounds == L'}' && !wcsncmp(in.c_str + idx + 1 + i, L"[[", 2)) {
+                        if (lua_str_mode == L'\0') {
+                            lua_str_mode = L']';
+                            i++;
+                        }
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
+                    break;
+                case L']':
+                    if (str_bounds == L'}' && !wcsncmp(in.c_str + idx + 1 + i, L"]]", 2)) {
+                        if (neutral_mode == 2) {
+                            neutral_mode = 0;
+                            i++;
+                        } else if (lua_str_mode == L']' && !neutral_mode) {
+                            lua_str_mode = L'\0';
+                            i++;
+                        }
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
+                    break;
+                case L'-':
+                    if (str_bounds == L'`' && neutral_mode) {
+                        neutral_mode = 0;
+                    } else if (str_bounds == L'}' && neutral_mode == 0) {
+                        if (!wcsncmp(in.c_str + idx + 1 + i, L"--[[", 4)) {
+                            neutral_mode = 2;
+                            i += 3;
+                        } else if (!wcsncmp(in.c_str + idx + 1 + i, L"--", 2)) {
+                            neutral_mode = 1;
+                            i++;
+                        }
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
+                    break;
+                case L'\\':
+                    if (str_bounds == L'`') {
+                        neutral_mode = !neutral_mode;
+                    } else if (lua_str_mode != L'\0' && neutral_mode == 0 || neutral_mode == 3) {
+                        neutral_mode = (!neutral_mode) * 3;
+                    }
+                    break;
+                case L'}':
+                    if (str_bounds == L'`' && neutral_mode) {
+                        neutral_mode = 0;
+                        break;
+                    }
+                    if (str_bounds != L'}') {
+                        break;
+                    }
+                    if (!neutral_mode && lua_str_mode == L'\0') {
+                        if (nest > 0) {
+                            nest--;
+                        } else {
+                            str_bounds = L'\0';
+                        }
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
+                    break;
+                case L'{':
+                    if (str_bounds == L'`' && neutral_mode) {
+                        neutral_mode = 0;
+                        break;
+                    }
+                    if (str_bounds == L'\0') {
+                        str_bounds = L'}';
+                        break;
+                    }
+                    if (str_bounds != L'}') {
+                        break;
+                    }
+                    if (!neutral_mode && lua_str_mode == L'\0') {
+                        nest++;
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
+                    break;
+                case L'`': // NEW
                 case L'\'':
                 case L'"':
+                    if (str_bounds == L'`' && neutral_mode) {
+                        neutral_mode = 0;
+                        break;
+                    } else if (str_bounds == L'}' && !neutral_mode && c != L'`') {
+                        //lua_str_mode = lua_str_mode == c ? L'\0' : c;
+                        if (lua_str_mode == c) {
+                            lua_str_mode = L'\0';
+                        } else if (lua_str_mode == L'\0') {
+                            lua_str_mode = c;
+                        }
+                        break;
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
                     if (c == str_bounds) {
-                        str_bounds = 0;
+                        str_bounds = L'\0';
                     } else if (str_bounds == L'\0') {
                         str_bounds = c;
                     }
                     break;
                 case L'/':
+                    if (str_bounds == L'`' && neutral_mode) {
+                        neutral_mode = 0;
+                        break;
+                    }
                     if (str_bounds == L'\0') {
                         dninner = 1;
                         goto widget_arg_parse_to_arg_process;
                     }
                     break;
                 case L'>':
+                    if (str_bounds == L'`' && neutral_mode) {
+                        neutral_mode = 0;
+                        break;
+                    }
                     if (str_bounds == L'\0') {
                         if (!ninner) {
                             inner->c_str = in.c_str + idx + 2 + i;
                         }
                         goto widget_arg_parse_to_arg_process;
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    }
+                    break;
+                case '\n':
+                    if (str_bounds == L'`' && neutral_mode == 1) {
+                        neutral_mode = 0;
+                    } else if (str_bounds == L'}' && neutral_mode == 1) {
+                        neutral_mode = 0;
+                    } else if (neutral_mode == 3) {
+                        neutral_mode = 0;
+                    } else if (lua_str_mode == L'"' || lua_str_mode == L'\'') {
+                        lua_str_mode = L'\0';
+                    }
+                    break;
+                default:
+                    if (neutral_mode == 3) {
+                        neutral_mode = 0;
                     }
                     break;
                 }
@@ -1985,7 +2552,7 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
             //str_debug(args_buffer);
             txt_list_tot_len argsln;
             list* argsl = NULL;
-            if (txt_parse_args(t, args_buffer, &argsln)) {
+            if (txt_parse_args(t, args_buffer, &argsln, ctx.L)) {
                 argsl = argsln.txts;
                 list_add(argsls, (void*)argsl);
             } else {
@@ -2109,6 +2676,9 @@ txt_template_fill_data htmw_process_txt(htmw_context ctx) {
                     out.args[s_idx++] = L'\0';
                     out.arg_shifts[s_shifs_idx++] = s_idx;
                     ln = ln->next;
+                    if (flag_includes(o->flags, T_ARGV_STRLT) || flag_includes(o->flags, T_ARGV_VALUE)) {
+                        str_delete(&o->value); // or `s` they share the same memory
+                    }
                     free(o);
                     //printf("1) %p -> \"%ls\"\n", out.args + s_idx - 1, out.args[s_idx - 1]);
                     //str_delete(s); do NOT delete
@@ -2220,6 +2790,23 @@ string htmw_compile_txt(htmw_context ctx, txt_template_fill_data* tf) {
     return out;
 }
 
+string htmw_postprocess(string s) {
+    string out = str_new(s.length + 1);
+    for (size_t i = 0; i < s.length; i++) {
+        if (s.c_str[i + 1] == L'#') {
+            str_append_ch(&out, L'<');
+            i++;
+        } else if (s.c_str[i + 1] == L'/' && s.c_str[i + 2] == L'#') {
+            str_append_ch(&out, L'<');
+            str_append_ch(&out, L'/');
+            i += 2;
+        } else {
+            str_append_ch(&out, s.c_str[i]);
+        }
+    }
+    return out;
+}
+
 typedef struct {
     char* origin_name;
     char* output_name;      // NULL if not recursive
@@ -2304,7 +2891,7 @@ int main(int argc, char** argv) {
                 config.output_name = argv[++i];
                 break;
             case 'v':
-                printf("HTMW vT.4\nWoxell\n\n");
+                printf("HTMW vT.5\nWoxell\n\n");
                 show_ver = 1;
                 break;
             default:
@@ -2343,7 +2930,10 @@ int main(int argc, char** argv) {
     //str_debug(tfd.ground);
     //printf("_%zu\n", tfd.fields_count);
 
-    string out = htmw_compile_txt(ctx, &tfd);
+    string preout = htmw_compile_txt(ctx, &tfd);
+
+    string out = htmw_postprocess(preout);
+    //str_delete(preout);
 
     //printf("%ls\n", o.c_str);
     lua_close(L);
